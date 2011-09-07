@@ -3,24 +3,25 @@ import transmissionrpc
 from PySide.QtCore import QObject, QThread, Signal, Slot, Property
 
 class ConnectionThread(QThread):
-    def __init__(self, host, port, user, password, parent):
+    def __init__(self, config, parent):
         QThread.__init__(self, parent)
 
         self._tc = None
-        self.setInfo(host, port, user, password)
+        self._info = config
 
-    def setInfo(self, host, port, user, password):
-        self._host = host
-        self._port = port
-        self._user = user
-        self._password = password
+    def updateInfo(self, host, port, user, password):
+        self._info.host = host
+        self._info.port = port
+        self._info.user = user
+        self._info.password = password
+        self._info.commit()
 
     def getInfo(self):
-        return (self.host, self.port, self.user, self.password)
+        return self._info
 
     def run(self):
         try:
-            self._tc = transmissionrpc.Client(self._host, port=self._port, user=self._user, password=self._password)
+            self._tc = transmissionrpc.Client(self._info.host, port=self._info.port, user=self._info.user, password=self._info.password)
         except:
             self._tc = None
 
@@ -28,9 +29,11 @@ class ConnectionThread(QThread):
         self.wait()
         self._tc = None
 
-    def connection(self):
+    def _getConnection(self):
         self.wait()
         return self._tc
+
+    connection = property(_getConnection)
 
 class UpdateThread(QThread):
     def __init__(self, server):
@@ -48,6 +51,7 @@ class UpdateThread(QThread):
                 print "Erro atualizando informacoes do torrent: ", t._id
 
     updated = Signal(object)
+    removed = Signal(object)
 
 
 class TorrentItem(object):
@@ -57,15 +61,19 @@ class TorrentItem(object):
         self._size = None
         self._completed = None
         self._info = None
+        self._updated = True
+
 
     def finished(self):
-        return self._size and (self._size == self._completed)
+        if self._updated:
+            return self._obj.percentDone == 1.0
+        else:
+            return False
 
     def size(self):
         if not self._size:
-            return "unknow"
-        else:
-            return self._size
+            self._size = self._sizeAsString(self._obj.sizeWhenDone)
+        return self._size
 
     def completed(self):
         if not self._completed:
@@ -75,20 +83,11 @@ class TorrentItem(object):
 
     def updateInfo(self, info):
         self._obj = info
-        self._updateSize()
-        self._updateCompleted()
+        self._updated = True
+        self._updateData()
 
-    def _updateSize(self):
-        _size = 0
-        for k, f in self._obj.files().items():
-            _size += int(f['size'])
-        self._size = self._sizeAsString(_size)
-
-    def _updateCompleted(self):
-        _size = 0
-        for k, f in self._obj.files().items():
-            _size += int(f['completed'])
-        self._completed = self._sizeAsString(_size)
+    def _updateData(self):
+        self._completed =  self._sizeAsString(self._obj.percentDone * self._obj.totalSize)
 
     def _sizeAsString(self, size):
         if size == 0:
@@ -114,32 +113,38 @@ class TorrentItem(object):
 
 
 class Server(QObject):
-    def __init__(self, host, port, user=None, password=None, parent=None):
+    def __init__(self, _config, parent=None):
         QObject.__init__(self, parent)
 
         self._items = []
         self._updateTimer = -1
-        self._process = ConnectionThread(host, port, user, password, self)
+        self._process = ConnectionThread(_config, self)
         self._updateProcess = UpdateThread(self)
         self._updateProcess.updated.connect(self._onItemUpdated)
 
-        mo = self.metaObject()
-        for i in range(mo.propertyCount()):
-            mp = mo.property(i)
-            print "NAME: %s NOTIFY: %d" % (mp.name(), mp.hasNotifySignal())
-
+        self.connecting.connect(self.stateChanged)
+        self.error.connect(self.stateChanged)
         self.clientConnected.connect(self.stateChanged)
         self.clientDisconnected.connect(self.stateChanged)
 
+    @Slot(str, str, str, str)
     def setInfo(self, host, port, user, password):
-        (_host, _port, _user, _password) = self._process.getInfo()
-        if (_host != host) or (_port != port) or (_user != user) or (_password != password):
-            self.disconnect()
-            self._process.setInfo(host, port, user, password)
+        _info = self._process.getInfo()
+        if (_info.host != host) or (_info.port != port) or (_info.user != user) or (_info.password != password):
+            self.disconnectClient()
+            self._process.updateInfo(host, port, user, password)
+
+    @Slot(result='QVariantMap')
+    def getInfo(self):
+        _info = self._process.getInfo()
+        return {'host': _info.host,
+                'port': _info.port,
+                'user': _info.user,
+                'password': _info.password}
 
     @Slot()
     def disconnectClient(self):
-        if self._process.connection():
+        if self._process.connection:
             self._process.stop()
             self.clientDisconnected.emit()
             if self._updateTimer != -1:
@@ -148,11 +153,22 @@ class Server(QObject):
 
     @Slot()
     def connectClient(self):
-        if self._process.connection():
+        if self._process.connection:
             return
-        self.connecting.emit()
         self._process.finished.connect(self._onConnect)
         self._process.start()
+        self.connecting.emit()
+
+    @Slot(str)
+    def addTorrent(self, url):
+        if not self.isOnline:
+            return
+        _result = self._process.connection.add_uri(url)
+        for k,v in _result.items():
+            _torrent = TorrentItem(k, v)
+            self._torrents.append(_torrent)
+            self.torrentAdded.emit(_torrent)
+
 
     def itens(self):
         return self._torrents
@@ -164,7 +180,7 @@ class Server(QObject):
         self._updateProcess.start()
 
     def _onConnect(self):
-        if self._process.connection():
+        if self._process.connection:
             self.clientConnected.emit()
             self._loadItens()
             self._updateTimer = self.startTimer(3000)
@@ -180,23 +196,23 @@ class Server(QObject):
         if not self.isOnline:
             return
 
-        torrents = self._connection().list()
+        torrents = self._process.connection.list()
         _torrents = []
         for k,v in torrents.items():
             t = TorrentItem(k, v)
-            self.torrentAdded.emit(t)
             _torrents.append(t)
+            self.torrentAdded.emit(t)
 
         self._torrents = _torrents
 
     def _isOnLine(self):
-        return not self._process.isRunning() and (self._process.connection() != None)
+        return not self._process.isRunning() and (self._process.connection != None)
 
     def _isRunning(self):
         return self._process.isRunning()
 
     def _connection(self):
-        return self._process.connection()
+        return self._process.connection
 
     connecting = Signal()
     clientConnected = Signal()

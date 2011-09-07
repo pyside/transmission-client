@@ -14,7 +14,7 @@ def main():
     QApplication.setGraphicsSystem('raster')
     app = QApplication([])
     serverConfig = ServerConfig()
-    server = Server(serverConfig.host, serverConfig.port, serverConfig.user, serverConfig.password)
+    server = Server(serverConfig)
     model = TorrentModel(server)
     searchModel = SearchModel()
 

@@ -54,7 +54,7 @@ Page {
         delegate: 
             ListDelegate {
                 onClicked: {
-                    torrentModel.addTorrent(model.ITEM_URL)
+                    server.addTorrent(model.ITEM_URL)
                     pageStack.pop();
                 }
             }

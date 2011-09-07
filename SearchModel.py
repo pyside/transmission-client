@@ -12,6 +12,7 @@ class LoadThread(QThread):
 
     def run(self):
         self._torrents = None
+        self._page = None
         try:
             self._page = search_main(self._term, self._pageNumber)
         except:
